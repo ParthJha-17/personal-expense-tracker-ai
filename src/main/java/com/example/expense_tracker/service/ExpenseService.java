@@ -35,8 +35,9 @@ public class ExpenseService {
         AiCategoryResult result =
         aiService.categorize(dto.getDescription(), dto.getAmount());
 
-        expense.setCategory(result.getCategory());
+        expense.setCategory(result.getCategory().name());
         expense.setCategoryConfidence(result.getConfidence());
+
 
         return expenseRepository.save(expense);
     }
