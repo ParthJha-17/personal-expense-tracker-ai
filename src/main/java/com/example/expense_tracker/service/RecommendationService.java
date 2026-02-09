@@ -2,7 +2,7 @@ package com.example.expense_tracker.service;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.EnumSet;
+import java.util.List;
 
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
@@ -10,8 +10,8 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StreamUtils;
 
-import com.example.expense_tracker.domain.ExpenseCategory;
-import com.example.expense_tracker.dto.AiCategoryResult;
+import com.example.expense_tracker.dto.RecommendationRequestDTO;
+import com.example.expense_tracker.dto.RecommendationResponseDTO;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -24,13 +24,13 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 @Service
-public class AiCategorizationService {
+public class RecommendationService {
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
     private final OkHttpClient client = new OkHttpClient();
     private final ObjectMapper mapper = new ObjectMapper();
-    private final RagContextService ragContextService;
+    private final RecommendationRagService recommendationRagService;
 
     private String promptTemplate;
 
@@ -40,11 +40,11 @@ public class AiCategorizationService {
     @Value("${openai.model}")
     private String model;
 
-    @Value("${openai.prompt.template}")
+    @Value("${openai.recommendations.prompt.template}")
     private Resource promptTemplateResource;
 
-    public AiCategorizationService(RagContextService ragContextService) {
-        this.ragContextService = ragContextService;
+    public RecommendationService(RecommendationRagService recommendationRagService) {
+        this.recommendationRagService = recommendationRagService;
     }
 
     @PostConstruct
@@ -54,26 +54,39 @@ public class AiCategorizationService {
                 StandardCharsets.UTF_8);
     }
 
-    public AiCategoryResult categorize(String description, Double amount) {
+    public RecommendationResponseDTO recommend(RecommendationRequestDTO request) {
         try {
-            String prompt = buildPrompt(description, amount);
+            String prompt = buildPrompt(request);
             String response = callOpenAI(prompt);
-            return parseAndValidate(response);
+            return parseResponse(response);
         } catch (Exception e) {
-            return new AiCategoryResult(ExpenseCategory.MISC, 0.4);
+            RecommendationResponseDTO fallback = new RecommendationResponseDTO();
+            fallback.setModel("N/A");
+            fallback.setRationale("Unable to generate recommendations.");
+            fallback.setRecommendations(List.of());
+            return fallback;
         }
     }
 
-    private String buildPrompt(String description, Double amount) {
-        String context = ragContextService.buildContext(description);
+    private String buildPrompt(RecommendationRequestDTO request) {
+        String query = String.join(" ", safeValue(request.getGoals()), safeValue(request.getProfile())).trim();
+        String context = recommendationRagService.buildContext(query);
         if (context.isBlank()) {
             context = "No additional context.";
         }
 
         return promptTemplate
-                .replace("{{description}}", description)
-                .replace("{{amount}}", String.valueOf(amount))
+                .replace("{{goals}}", defaultText(request.getGoals()))
+                .replace("{{profile}}", defaultText(request.getProfile()))
                 .replace("{{context}}", context);
+    }
+
+    private String defaultText(String value) {
+        return value == null || value.isBlank() ? "Not provided." : value;
+    }
+
+    private String safeValue(String value) {
+        return value == null ? "" : value;
     }
 
     private String callOpenAI(String prompt) throws IOException {
@@ -84,7 +97,7 @@ public class AiCategorizationService {
         message.put("role", "user");
         message.put("content", prompt);
         messages.add(message);
-        payload.put("temperature", 0.2);
+        payload.put("temperature", 0.3);
 
         String body = mapper.writeValueAsString(payload);
 
@@ -102,7 +115,7 @@ public class AiCategorizationService {
         }
     }
 
-    private AiCategoryResult parseAndValidate(String responseJson) throws IOException {
+    private RecommendationResponseDTO parseResponse(String responseJson) throws IOException {
         JsonNode root = mapper.readTree(responseJson);
         String content = root
                 .get("choices").get(0)
@@ -110,17 +123,14 @@ public class AiCategorizationService {
                 .asText();
 
         JsonNode result = mapper.readTree(content);
+        RecommendationResponseDTO response = new RecommendationResponseDTO();
+        response.setModel(result.path("model").asText());
+        response.setRationale(result.path("rationale").asText());
 
-        String categoryStr = result.get("category").asText();
-        double confidence = result.get("confidence").asDouble();
-
-        ExpenseCategory category = EnumSet
-                .allOf(ExpenseCategory.class)
-                .stream()
-                .filter(c -> c.name().equalsIgnoreCase(categoryStr))
-                .findFirst()
-                .orElse(ExpenseCategory.MISC);
-
-        return new AiCategoryResult(category, confidence);
+        List<String> recommendations = mapper.convertValue(
+                result.path("recommendations"),
+                mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+        response.setRecommendations(recommendations);
+        return response;
     }
 }
